@@ -4,6 +4,33 @@
   
   
   <entry>
+    <title>Java 学习心得</title>
+    <link href="/2026/03/22/java-learning-experience/"/>
+    <url>/2026/03/22/java-learning-experience/</url>
+    
+    <content type="html"><![CDATA[<h2 id="Java-学习心得"><a href="#Java-学习心得" class="headerlink" title="Java 学习心得"></a>Java 学习心得</h2><p>学习 Java 是一个循序渐进的过程，以下是我的一些心得体会：</p><h3 id="成体系的学习"><a href="#成体系的学习" class="headerlink" title="成体系的学习"></a>成体系的学习</h3><p>要成体系的学习，不能零散地学习知识点。建议按照以下路线：</p><ol><li><strong>Java 基础</strong> - 语法、面向对象、集合框架</li><li><strong>Java 进阶</strong> - 多线程、JVM、IO&#x2F;NIO</li><li><strong>框架学习</strong> - Spring、MyBatis 等</li><li><strong>项目实战</strong> - 将所学知识应用到实际项目中</li></ol><h3 id="多练习才能学会"><a href="#多练习才能学会" class="headerlink" title="多练习才能学会"></a>多练习才能学会</h3><p>光看不练是学不会的。只有通过大量的编码练习，才能真正掌握 Java 编程：</p><ul><li>多写代码，多调试</li><li>参与开源项目</li><li>自己动手做项目</li><li>总结归纳，形成自己的知识体系</li></ul><blockquote><p>“纸上得来终觉浅，绝知此事要躬行。”</p></blockquote><p>坚持长期主义，坚持终身学习！</p>]]></content>
+    
+    
+    <categories>
+      
+      <category>Daily Log</category>
+      
+    </categories>
+    
+    
+    <tags>
+      
+      <tag>Tech</tag>
+      
+      <tag>Java</tag>
+      
+    </tags>
+    
+  </entry>
+  
+  
+  
+  <entry>
     <title>Daily Update - January 25, 2026</title>
     <link href="/2026/01/25/daily-update-2026-01-25/"/>
     <url>/2026/01/25/daily-update-2026-01-25/</url>
