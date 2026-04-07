@@ -1,6 +1,96 @@
 <?xml version="1.0" encoding="utf-8"?>
 <search>
   <entry>
+    <title>从零构建高并发秒杀系统：架构设计与实践</title>
+    <url>/2026/04/07/high-concurrency-seckill-system/</url>
+    <content><![CDATA[<h2 id="前言"><a href="#前言" class="headerlink" title="前言"></a>前言</h2><p>最近我完成了一个单体秒杀系统的开发，在这篇文章中，我将分享这个系统的架构设计、核心技术选型以及关键实现细节。这是一个基于 Spring Boot 3.x 的高并发秒杀系统，采用了 Redis + RabbitMQ 的经典组合来应对高并发场景。</p>
+<h2 id="系统架构概览"><a href="#系统架构概览" class="headerlink" title="系统架构概览"></a>系统架构概览</h2><h3 id="技术栈"><a href="#技术栈" class="headerlink" title="技术栈"></a>技术栈</h3><ul>
+<li><strong>后端框架</strong>: Spring Boot 3.2.5</li>
+<li><strong>持久层</strong>: MyBatis-Plus 3.5.6</li>
+<li><strong>缓存</strong>: Redis（库存预减、分布式锁、热点数据缓存）</li>
+<li><strong>消息队列</strong>: RabbitMQ（异步下单、订单超时取消）</li>
+<li><strong>认证</strong>: JWT</li>
+<li><strong>工具库</strong>: Hutool</li>
+</ul>
+<h3 id="核心设计思路"><a href="#核心设计思路" class="headerlink" title="核心设计思路"></a>核心设计思路</h3><p>秒杀系统的核心挑战在于：<strong>瞬时高并发</strong>、<strong>库存超卖</strong>、<strong>重复购买</strong>。我的解决方案围绕以下几点展开：</p>
+<ol>
+<li><strong>多层拦截</strong>：JVM 内存标记 → Redis 预减 → MySQL 最终扣减</li>
+<li><strong>异步削峰</strong>：Redis 快速响应用户，MQ 异步处理订单</li>
+<li><strong>原子操作</strong>：Lua 脚本保证 Redis 操作的原子性</li>
+</ol>
+<h2 id="核心模块实现"><a href="#核心模块实现" class="headerlink" title="核心模块实现"></a>核心模块实现</h2><h3 id="1-Redis-库存预减（Lua-脚本）"><a href="#1-Redis-库存预减（Lua-脚本）" class="headerlink" title="1. Redis 库存预减（Lua 脚本）"></a>1. Redis 库存预减（Lua 脚本）</h3><p>这是秒杀的第一道关卡，使用 Lua 脚本保证原子性操作：</p>
+<figure class="highlight lua"><table><tr><td class="code"><pre><span class="line"><span class="comment">-- seckill.lua</span></span><br><span class="line"><span class="comment">-- KEYS[1] = seckill:info:&#123;seckillGoodsId&#125;</span></span><br><span class="line"><span class="comment">-- KEYS[2] = seckill:bought:&#123;seckillGoodsId&#125;</span></span><br><span class="line"></span><br><span class="line"><span class="comment">-- 批量获取活动核心元数据</span></span><br><span class="line"><span class="keyword">local</span> info = redis.call(<span class="string">&#x27;HMGET&#x27;</span>, KEYS[<span class="number">1</span>], <span class="string">&#x27;status&#x27;</span>, <span class="string">&#x27;startTime&#x27;</span>, <span class="string">&#x27;endTime&#x27;</span>, <span class="string">&#x27;stock&#x27;</span>)</span><br><span class="line"><span class="keyword">local</span> <span class="built_in">status</span> = <span class="built_in">tonumber</span>(info[<span class="number">1</span>])</span><br><span class="line"><span class="keyword">local</span> startTime = <span class="built_in">tonumber</span>(info[<span class="number">2</span>])</span><br><span class="line"><span class="keyword">local</span> endTime = <span class="built_in">tonumber</span>(info[<span class="number">3</span>])</span><br><span class="line"><span class="keyword">local</span> stock = <span class="built_in">tonumber</span>(info[<span class="number">4</span>])</span><br><span class="line"><span class="keyword">local</span> nowTime = <span class="built_in">tonumber</span>(ARGV[<span class="number">2</span>])</span><br><span class="line"></span><br><span class="line"><span class="comment">-- 检查状态</span></span><br><span class="line"><span class="keyword">if</span> <span class="built_in">status</span> == <span class="literal">nil</span> <span class="keyword">or</span> <span class="built_in">status</span> ~= <span class="number">1</span> <span class="keyword">then</span></span><br><span class="line">    <span class="keyword">return</span> <span class="number">-3</span>  <span class="comment">-- 已下架</span></span><br><span class="line"><span class="keyword">end</span></span><br><span class="line"></span><br><span class="line"><span class="comment">-- 校验时间窗口</span></span><br><span class="line"><span class="keyword">if</span> startTime == <span class="literal">nil</span> <span class="keyword">or</span> endTime == <span class="literal">nil</span> <span class="keyword">or</span> nowTime &lt; startTime <span class="keyword">or</span> nowTime &gt; endTime <span class="keyword">then</span></span><br><span class="line">    <span class="keyword">return</span> <span class="number">-4</span>  <span class="comment">-- 未开始或已结束</span></span><br><span class="line"><span class="keyword">end</span></span><br><span class="line"></span><br><span class="line"><span class="comment">-- 检查库存</span></span><br><span class="line"><span class="keyword">if</span> stock == <span class="literal">nil</span> <span class="keyword">or</span> stock &lt;= <span class="number">0</span> <span class="keyword">then</span></span><br><span class="line">    <span class="keyword">return</span> <span class="number">-1</span>  <span class="comment">-- 售罄</span></span><br><span class="line"><span class="keyword">end</span></span><br><span class="line"></span><br><span class="line"><span class="comment">-- 检查重复购买</span></span><br><span class="line"><span class="keyword">local</span> bought = redis.call(<span class="string">&#x27;SISMEMBER&#x27;</span>, KEYS[<span class="number">2</span>], ARGV[<span class="number">1</span>])</span><br><span class="line"><span class="keyword">if</span> bought == <span class="number">1</span> <span class="keyword">then</span></span><br><span class="line">    <span class="keyword">return</span> <span class="number">-2</span>  <span class="comment">-- 重复购买</span></span><br><span class="line"><span class="keyword">end</span></span><br><span class="line"></span><br><span class="line"><span class="comment">-- 原子扣减库存</span></span><br><span class="line">redis.call(<span class="string">&#x27;HINCRBY&#x27;</span>, KEYS[<span class="number">1</span>], <span class="string">&#x27;stock&#x27;</span>, <span class="number">-1</span>)</span><br><span class="line">redis.call(<span class="string">&#x27;SADD&#x27;</span>, KEYS[<span class="number">2</span>], ARGV[<span class="number">1</span>])</span><br><span class="line"></span><br><span class="line"><span class="keyword">return</span> <span class="number">1</span>  <span class="comment">-- 成功</span></span><br></pre></td></tr></table></figure>
+
+<h3 id="2-JVM-内存标记优化"><a href="#2-JVM-内存标记优化" class="headerlink" title="2. JVM 内存标记优化"></a>2. JVM 内存标记优化</h3><p>为了避免已售罄商品还频繁访问 Redis，我们在 JVM 内存中维护一个售罄标记：</p>
+<figure class="highlight java"><table><tr><td class="code"><pre><span class="line"><span class="comment">// SeckillService.java</span></span><br><span class="line"><span class="keyword">private</span> <span class="keyword">final</span> Map&lt;Long, Boolean&gt; localOverMap = <span class="keyword">new</span> <span class="title class_">ConcurrentHashMap</span>&lt;&gt;();</span><br><span class="line"></span><br><span class="line"><span class="comment">// 在 Lua 返回 -1（售罄）时设置</span></span><br><span class="line">localOverMap.put(seckillGoodsId, <span class="literal">true</span>);</span><br><span class="line"></span><br><span class="line"><span class="comment">// 在获取路径时先检查内存标记</span></span><br><span class="line"><span class="keyword">if</span> (localOverMap.getOrDefault(seckillGoodsId, <span class="literal">false</span>)) &#123;</span><br><span class="line">    <span class="keyword">throw</span> <span class="keyword">new</span> <span class="title class_">BusinessException</span>(ResultCode.SECKILL_SOLD_OUT);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h3 id="3-动态路径隐藏"><a href="#3-动态路径隐藏" class="headerlink" title="3. 动态路径隐藏"></a>3. 动态路径隐藏</h3><p>为了防止接口被恶意刷，我们采用动态路径机制：</p>
+<figure class="highlight java"><table><tr><td class="code"><pre><span class="line"><span class="comment">// 生成随机 Token 作为路径</span></span><br><span class="line"><span class="keyword">public</span> String <span class="title function_">createPath</span><span class="params">(Long userId, Long seckillGoodsId)</span> &#123;</span><br><span class="line">    <span class="comment">// ... 省略前置校验 ...</span></span><br><span class="line">    </span><br><span class="line">    <span class="type">String</span> <span class="variable">pathToken</span> <span class="operator">=</span> IdUtil.fastSimpleUUID();</span><br><span class="line">    <span class="type">String</span> <span class="variable">key</span> <span class="operator">=</span> PATH_KEY + userId + <span class="string">&quot;:&quot;</span> + seckillGoodsId;</span><br><span class="line">    stringRedisTemplate.opsForValue().set(key, pathToken, <span class="number">60</span>, TimeUnit.SECONDS);</span><br><span class="line">    </span><br><span class="line">    <span class="keyword">return</span> pathToken;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h3 id="4-RabbitMQ-异步下单"><a href="#4-RabbitMQ-异步下单" class="headerlink" title="4. RabbitMQ 异步下单"></a>4. RabbitMQ 异步下单</h3><p>Redis 预减成功后，发送消息到 MQ，由消费者异步处理 MySQL 订单：</p>
+<figure class="highlight java"><table><tr><td class="code"><pre><span class="line"><span class="comment">// SeckillService.doSeckill()</span></span><br><span class="line"><span class="comment">// 发送 MQ 消息</span></span><br><span class="line"><span class="type">SeckillMessage</span> <span class="variable">message</span> <span class="operator">=</span> <span class="keyword">new</span> <span class="title class_">SeckillMessage</span>(userId, seckillGoodsId, seckillPrice);</span><br><span class="line">rabbitTemplate.convertAndSend(SECKILL_EXCHANGE, SECKILL_ROUTING_KEY, message);</span><br><span class="line"></span><br><span class="line"><span class="comment">// 设置排队标记</span></span><br><span class="line"><span class="type">String</span> <span class="variable">resultKey</span> <span class="operator">=</span> RESULT_KEY + userId + <span class="string">&quot;:&quot;</span> + seckillGoodsId;</span><br><span class="line">stringRedisTemplate.opsForValue().set(resultKey, <span class="string">&quot;0&quot;</span>, <span class="number">30</span>, TimeUnit.MINUTES);</span><br></pre></td></tr></table></figure>
+
+<h3 id="5-订单超时取消（延迟队列）"><a href="#5-订单超时取消（延迟队列）" class="headerlink" title="5. 订单超时取消（延迟队列）"></a>5. 订单超时取消（延迟队列）</h3><p>利用 RabbitMQ 的 TTL + DLX 实现延迟队列，自动取消超时未支付订单：</p>
+<figure class="highlight java"><table><tr><td class="code"><pre><span class="line"><span class="comment">// RabbitConfig.java</span></span><br><span class="line"><span class="meta">@Bean</span></span><br><span class="line"><span class="keyword">public</span> Queue <span class="title function_">delayQueue</span><span class="params">()</span> &#123;</span><br><span class="line">    <span class="keyword">return</span> QueueBuilder.durable(DELAY_QUEUE)</span><br><span class="line">            .ttl(ORDER_TIMEOUT_MS)  <span class="comment">// 15分钟</span></span><br><span class="line">            .deadLetterExchange(DLX_EXCHANGE)</span><br><span class="line">            .deadLetterRoutingKey(ORDER_CANCEL_ROUTING_KEY)</span><br><span class="line">            .build();</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h3 id="6-接口限流"><a href="#6-接口限流" class="headerlink" title="6. 接口限流"></a>6. 接口限流</h3><p>基于 Redis + Lua 实现固定窗口限流：</p>
+<figure class="highlight java"><table><tr><td class="code"><pre><span class="line"><span class="meta">@AccessLimit(seconds = 5, maxCount = 5, needLogin = true)</span></span><br><span class="line"><span class="meta">@GetMapping(&quot;/path/&#123;seckillGoodsId&#125;&quot;)</span></span><br><span class="line"><span class="keyword">public</span> Result&lt;Map&lt;String, String&gt;&gt; <span class="title function_">getPath</span><span class="params">(<span class="meta">@PathVariable</span> Long seckillGoodsId)</span> &#123;</span><br><span class="line">    <span class="comment">// ...</span></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h2 id="秒杀流程图"><a href="#秒杀流程图" class="headerlink" title="秒杀流程图"></a>秒杀流程图</h2><figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">用户请求</span><br><span class="line">   ↓</span><br><span class="line">[内存标记] → 售罄？→ 返回失败</span><br><span class="line">   ↓ 未售罄</span><br><span class="line">[获取动态路径] → 时间/状态校验 → 生成 Token</span><br><span class="line">   ↓</span><br><span class="line">[执行秒杀] → 验证路径 → Lua 脚本原子扣减</span><br><span class="line">   ↓ 成功</span><br><span class="line">[发送 MQ] → 设置排队标记 → 返回&quot;排队中&quot;</span><br><span class="line">   ↓</span><br><span class="line">[MQ 消费者] → 幂等检查 → MySQL 扣库存 → 创建订单</span><br><span class="line">   ↓</span><br><span class="line">[设置结果] → 用户轮询获取最终结果</span><br></pre></td></tr></table></figure>
+
+<h2 id="关键数据结构"><a href="#关键数据结构" class="headerlink" title="关键数据结构"></a>关键数据结构</h2><h3 id="Redis-Key-设计"><a href="#Redis-Key-设计" class="headerlink" title="Redis Key 设计"></a>Redis Key 设计</h3><table>
+<thead>
+<tr>
+<th>Key 模式</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>seckill:info:&#123;id&#125;</code></td>
+<td>Hash</td>
+<td>秒杀商品信息（stock, startTime, endTime, status, price）</td>
+</tr>
+<tr>
+<td><code>seckill:bought:&#123;id&#125;</code></td>
+<td>Set</td>
+<td>已购买用户集合</td>
+</tr>
+<tr>
+<td><code>seckill:path:&#123;userId&#125;:&#123;goodsId&#125;</code></td>
+<td>String</td>
+<td>动态路径 Token</td>
+</tr>
+<tr>
+<td><code>seckill:result:&#123;userId&#125;:&#123;goodsId&#125;</code></td>
+<td>String</td>
+<td>秒杀结果（0&#x3D;排队中, 1:orderNo&#x3D;成功, 2&#x3D;失败）</td>
+</tr>
+<tr>
+<td><code>limit:&#123;uri&#125;:&#123;userId&#125;</code></td>
+<td>String</td>
+<td>限流计数</td>
+</tr>
+</tbody></table>
+<h2 id="总结与心得"><a href="#总结与心得" class="headerlink" title="总结与心得"></a>总结与心得</h2><p>这个秒杀系统的开发让我对高并发场景有了更深入的理解：</p>
+<ol>
+<li><strong>缓存为王</strong>：Redis 是抗住高并发的关键，尽可能在缓存层拦截请求</li>
+<li><strong>原子性保证</strong>：Lua 脚本是 Redis 原子操作的利器</li>
+<li><strong>异步削峰</strong>：消息队列能很好地缓冲瞬时流量，保护下游 MySQL</li>
+<li><strong>多层防护</strong>：内存标记、Redis、MySQL 三层拦截，层层递进</li>
+<li><strong>最终一致性</strong>：通过 Redis 回滚、对账任务保证数据最终一致</li>
+</ol>
+<p>当然，这只是一个单体版本的秒杀系统，实际生产中可能还需要考虑：集群部署、分片库存、全链路压测、监控告警等。但作为学习项目，它覆盖了秒杀系统的核心知识点。</p>
+]]></content>
+      <tags>
+        <tag>高并发</tag>
+        <tag>秒杀系统</tag>
+        <tag>Spring Boot</tag>
+        <tag>Redis</tag>
+        <tag>RabbitMQ</tag>
+      </tags>
+  </entry>
+  <entry>
     <title>Hello World</title>
     <url>/2026/01/21/hello-world/</url>
     <content><![CDATA[<p>Welcome to <a href="https://hexo.io/">Hexo</a>! This is your very first post. Check <a href="https://hexo.io/docs/">documentation</a> for more info. If you get any problems when using Hexo, you can find the answer in <a href="https://hexo.io/docs/troubleshooting.html">troubleshooting</a> or you can ask me on <a href="https://github.com/hexojs/hexo/issues">GitHub</a>.</p>
